@@ -1,3 +1,5 @@
+from ..utils.orange_export import orange_dataset_configs
+
 # Datasets
 
 DATASET_DEFAULT_CONFIG = {
@@ -508,6 +510,8 @@ DATASET_DEFAULT_CONFIG = {
         ],
     },
 }
+
+DATASET_DEFAULT_CONFIG.update(orange_dataset_configs())
 
 # Arguments
 

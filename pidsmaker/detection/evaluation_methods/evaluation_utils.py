@@ -1060,6 +1060,14 @@ def compute_tw_labels(cfg):
     """
     out_path = cfg.construction._tw_labels
     out_file = os.path.join(out_path, "tw_to_malicious_nodes.pkl")
+
+    if labelling.is_orange_dataset(cfg):
+        log("Computing Orange time-window labels...")
+        os.makedirs(out_path, exist_ok=True)
+        tw_to_malicious_nodes = labelling.get_orange_tw_to_malicious_nodes(cfg)
+        torch.save(tw_to_malicious_nodes, out_file)
+        return tw_to_malicious_nodes
+
     uuid_to_node_id = get_ground_truth_uuid_to_node_id(cfg)
 
     log("Computing time-window labels...")

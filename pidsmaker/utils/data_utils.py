@@ -303,7 +303,7 @@ def extract_msg_from_data(
     return data_set
 
 def get_possible_triplets(cfg):
-    entity_map = get_node_map(from_zero=True)
+    entity_map = get_node_map(from_zero=True, cfg=cfg)
     event_map = get_rel2id(cfg, from_zero=True)
     possible_events = get_possible_events(cfg)
 

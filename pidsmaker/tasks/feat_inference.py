@@ -104,7 +104,7 @@ def get_indexid2vec(cfg):
 
 def main_from_config(cfg):
     rel2id = get_rel2id(cfg)
-    ntype2id = get_node_map()
+    ntype2id = get_node_map(cfg=cfg)
     etype2onehot = gen_relation_onehot(rel2id=rel2id)
     ntype2onehot = gen_relation_onehot(rel2id=ntype2id)
 

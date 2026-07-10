@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 nltk.download("punkt", quiet=True)
 
+from .orange_export import is_orange_dataset
 from pidsmaker.config import update_cfg_for_multi_dataset
 
 
@@ -473,6 +474,9 @@ def get_node_to_path_and_type(cfg):
 
     else:
         node_to_path_type = torch.load(out_file)
+
+    if is_orange_dataset(cfg):
+        node_to_path_type = {int(k): v for k, v in node_to_path_type.items()}
 
     return node_to_path_type
 

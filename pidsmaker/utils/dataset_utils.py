@@ -298,6 +298,13 @@ possible_events_graph_processor_carbon_black_edr = {
 
 # TODO: add possible events for other datasets (i.e., with different edges)
 
+from .orange_export import (
+    bidirectional_map,
+    get_edge_labels,
+    get_node_types,
+    is_orange_dataset,
+)
+
 ntype2id = {
     1: "subject",
     "subject": 1,
@@ -326,6 +333,9 @@ def decrement_dict(d):
 def get_rel2id(cfg, from_zero=False):
     dataset_name = cfg.dataset.name.lower()
 
+    if is_orange_dataset(cfg):
+        rel2id_orange = bidirectional_map(get_edge_labels(cfg))
+        return decrement_dict(rel2id_orange) if from_zero else rel2id_orange
     if dataset_name in optc_datasets:
         return decrement_dict(rel2id_optc) if from_zero else rel2id_optc
     elif dataset_name in atlasv2_datasets:
@@ -336,7 +346,10 @@ def get_rel2id(cfg, from_zero=False):
         return decrement_dict(rel2id_darpa_tc) if from_zero else rel2id_darpa_tc
 
 
-def get_node_map(from_zero=False):
+def get_node_map(from_zero=False, cfg=None):
+    if cfg is not None and is_orange_dataset(cfg):
+        node_map = bidirectional_map(get_node_types(cfg))
+        return decrement_dict(node_map) if from_zero else node_map
     if from_zero:
         return decrement_dict(ntype2id)
     return ntype2id
@@ -345,6 +358,8 @@ def get_node_map(from_zero=False):
 def get_num_edge_type(cfg):
     dataset_name = cfg.dataset.name.lower()
 
+    if is_orange_dataset(cfg):
+        return len(get_edge_labels(cfg))
     if dataset_name not in optc_datasets and "edge_type_triplet" in cfg.batching.edge_features:
         possible_events = get_possible_events(cfg)
         return sum([len(events) for events in possible_events.values()])
@@ -365,6 +380,10 @@ def get_rel2id_considering_triplets(cfg):
 def get_possible_events(cfg):
     dataset_name = cfg.dataset.name.lower()
 
+    if is_orange_dataset(cfg):
+        raise NotImplementedError(
+            "Orange exports do not define edge_type_triplet events. Use batching.edge_features=edge_type."
+        )
     if dataset_name in graph_processor_carbon_black_edr_datasets:
         return possible_events_graph_processor_carbon_black_edr
     else:

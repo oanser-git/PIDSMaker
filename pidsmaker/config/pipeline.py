@@ -23,6 +23,7 @@ from .config import (
     UNCERTAINTY_EXP_YML_FOLDER,
     Arg,
 )
+from ..utils.orange_export import apply_dataset_metadata
 
 ROOT_PROJECT_PATH = pathlib.Path(__file__).parent.parent.parent.resolve()
 ROOT_GROUND_TRUTH_DIR = os.path.join(ROOT_PROJECT_PATH, "Ground_Truth/")
@@ -87,6 +88,7 @@ def set_dataset_cfg(cfg, dataset):
     cfg.dataset.name = dataset
     for attr, value in DATASET_DEFAULT_CONFIG[cfg.dataset.name].items():
         setattr(cfg.dataset, attr, value)
+    apply_dataset_metadata(cfg.dataset)
 
 
 def get_runtime_required_args(return_unknown_args=False, args=None):

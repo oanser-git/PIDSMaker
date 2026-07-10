@@ -14,15 +14,23 @@ from pidsmaker.utils.utils import (
     get_all_graphs_for_dates,
     get_multi_datasets,
     load_graphs_for_dates,
+    log,
     log_start,
     log_tqdm,
     set_seed,
 )
+from pidsmaker.utils.orange_export import is_orange_dataset, replace_with_symlink
 
 
 def no_transformation(base_dir, dst_dir):
     # If no transformation is used, we copy all original graphs to the transformation task path
     copy_directory(base_dir, dst_dir)
+
+
+def link_orange_transformation(cfg):
+    source = os.path.join(cfg.dataset.orange_export_dir, "transformation", "nx")
+    replace_with_symlink(source, cfg.transformation._graphs_dir)
+    log("Linked prebuilt Orange transformation artifacts from '{}'".format(source))
 
 
 def add_synthetic_attacks(base_dir, dst_dir, cfg, method):
@@ -98,6 +106,14 @@ def main_from_config(cfg):
 
     base_dir = cfg.construction._graphs_dir
     dst_dir = cfg.transformation._graphs_dir
+
+    if is_orange_dataset(cfg):
+        if len(methods) == 1 and methods[0] == "none":
+            link_orange_transformation(cfg)
+            return
+        raise NotImplementedError(
+            "Orange prebuilt exports currently support transformation.used_methods=none only."
+        )
 
     if len(methods) == 1 and methods[0] == "none":
         no_transformation(base_dir, dst_dir)

@@ -110,7 +110,7 @@ def encoder_factory(cfg, msg_dim, in_dim, device, max_node_num, graph_reindexer)
     use_tgn = "tgn" in cfg.training.encoder.used_methods
     dropout = cfg.training.encoder.dropout
 
-    node_map = get_node_map(from_zero=True)
+    node_map = get_node_map(from_zero=True, cfg=cfg)
     edge_map = get_rel2id(cfg, from_zero=True)
 
     edge_dim = get_edge_dim(cfg, msg_dim)
@@ -377,7 +377,7 @@ def objective_factory(cfg, in_dim, graph_reindexer, device, objective_cfg=None):
         objective_cfg = cfg.training.decoder
     node_out_dim = cfg.training.node_out_dim
 
-    entity_map = get_node_map(from_zero=True)
+    entity_map = get_node_map(from_zero=True, cfg=cfg)
     event_map = get_rel2id(cfg, from_zero=True)
 
     objectives = []
