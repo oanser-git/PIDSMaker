@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 nltk.download("punkt", quiet=True)
 
-from .orange_export import is_orange_dataset
+from .orange_export import ORANGE_RAW_NODE_TYPES, is_orange_dataset
 from pidsmaker.config import update_cfg_for_multi_dataset
 
 
@@ -388,16 +388,44 @@ def tokenize_netflow(sentence: str):
     return word_tokenize(sentence.replace(":", " : ").replace(".", " . "))
 
 
+_SUBJECT_TOKEN_NODE_TYPES = {"subject", "process", "task"}
+_FILE_TOKEN_NODE_TYPES = {
+    "block",
+    "char",
+    "device",
+    "directory",
+    "file",
+    "iattr",
+    "inode_unknown",
+    "link",
+    "named pipe",
+    "path",
+    "pipe",
+    "regular file",
+    "super block",
+    "symlink",
+    "xattr",
+}
+_NETFLOW_TOKEN_NODE_TYPES = {"address", "netflow", "network", "packet", "socket"}
+_KNOWN_TOKEN_NODE_TYPES = (
+    _SUBJECT_TOKEN_NODE_TYPES | _FILE_TOKEN_NODE_TYPES | _NETFLOW_TOKEN_NODE_TYPES
+)
+_GENERIC_TOKEN_NODE_TYPES = set(ORANGE_RAW_NODE_TYPES) - _KNOWN_TOKEN_NODE_TYPES
+
+
 def tokenize_label(node_label, node_type):
+    node_type = str(node_type).strip().lower()
     if node_label == "":
         return [""]
-    elif node_type == "subject":
+    elif node_type in _SUBJECT_TOKEN_NODE_TYPES:
         return tokenize_subject(node_label)
-    elif node_type == "file":
+    elif node_type in _FILE_TOKEN_NODE_TYPES:
         return tokenize_file(node_label)
-    elif node_type == "netflow":
+    elif node_type in _NETFLOW_TOKEN_NODE_TYPES:
         return tokenize_netflow(node_label)
-    raise ValueError("Invalid node type")
+    elif node_type in _GENERIC_TOKEN_NODE_TYPES:
+        return tokenize_arbitrary_label(node_label)
+    raise ValueError(f"Invalid node type: {node_type}")
 
 
 def tokenize_arbitrary_label(sentence):
