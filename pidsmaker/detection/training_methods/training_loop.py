@@ -10,6 +10,7 @@ Handles model training with:
 """
 
 import copy
+import os
 import tracemalloc
 from time import perf_counter as timer
 
@@ -61,6 +62,20 @@ def main(cfg):
     )
     optimizer = optimizer_factory(cfg, parameters=set(model.parameters()))
 
+    resume_checkpoint = os.environ.get("PIDSMAKER_RESUME_CHECKPOINT")
+    save_checkpoint = os.environ.get("PIDSMAKER_SAVE_CHECKPOINT")
+    start_epoch = 0
+    if resume_checkpoint:
+        checkpoint = torch.load(resume_checkpoint, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if checkpoint.get("optimizer_state_dict") is not None:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = int(checkpoint.get("last_epoch", -1)) + 1
+        log(
+            f"Loaded training checkpoint from {resume_checkpoint}; continuing at epoch {start_epoch}",
+            return_line=True,
+        )
+
     run_evaluation = cfg.training_loop.run_evaluation
     assert run_evaluation in ["best_epoch", "each_epoch"], (
         f"Invalid run evaluation {run_evaluation}"
@@ -83,7 +98,7 @@ def main(cfg):
     if use_few_shot:
         num_epochs += 1  # in few-shot, the first epoch is without ssl training
 
-    for epoch in range(0, num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         best_val_score, best_model, best_epoch = float("-inf"), None, None
 
         if not use_few_shot or (use_few_shot and epoch > 0):
@@ -274,6 +289,19 @@ def main(cfg):
             ),
         }
     )
+
+    if save_checkpoint:
+        os.makedirs(os.path.dirname(save_checkpoint), exist_ok=True)
+        torch.save(
+            {
+                "last_epoch": num_epochs - 1,
+                "model_state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
+                "optimizer_state_dict": optimizer.state_dict(),
+                "training_num_epochs": num_epochs,
+            },
+            save_checkpoint,
+        )
+        log(f"Saved training checkpoint to {save_checkpoint}", return_line=True)
 
     return best_val_score
 
