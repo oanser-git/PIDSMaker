@@ -29,6 +29,51 @@ from pidsmaker.utils.utils import get_device, log, log_start, log_tqdm, set_seed
 from . import inference_loop
 
 
+def load_checkpoint_model_state(model, checkpoint_state):
+    current_state = model.state_dict()
+    adjusted_keys = []
+    model_state = {}
+    for key, value in checkpoint_state.items():
+        current_value = current_state.get(key)
+        try:
+            current_shape = tuple(current_value.shape) if current_value is not None else None
+        except RuntimeError:
+            current_shape = None
+        try:
+            current_numel = current_value.numel() if current_value is not None else None
+        except (RuntimeError, ValueError):
+            current_numel = None
+        if (
+            current_value is not None
+            and value.numel() == 0
+            and key.endswith("lin_edge.weight")
+            and (current_shape is None or current_numel == 0)
+        ):
+            adjusted_keys.append(key)
+            continue
+        if (
+            current_value is not None
+            and current_shape is not None
+            and tuple(value.shape) != current_shape
+            and value.numel() == 0
+            and current_numel == 0
+        ):
+            adjusted_keys.append(key)
+            continue
+        else:
+            model_state[key] = value
+    incompatible = model.load_state_dict(model_state, strict=False)
+    unexpected = list(incompatible.unexpected_keys)
+    missing = [key for key in incompatible.missing_keys if key not in set(adjusted_keys)]
+    if unexpected or missing:
+        raise RuntimeError(
+            "Error(s) in loading checkpoint state: missing={} unexpected={}".format(
+                missing, unexpected
+            )
+        )
+    return adjusted_keys
+
+
 def main(cfg):
     """Main training loop executing self-supervised pretraining and optional few-shot fine-tuning.
 
@@ -60,16 +105,22 @@ def main(cfg):
     model = build_model(
         data_sample=train_data[0][0], device=device, cfg=cfg, max_node_num=max_node_num
     )
-    optimizer = optimizer_factory(cfg, parameters=set(model.parameters()))
+    optimizer = optimizer_factory(cfg, parameters=list(model.parameters()))
 
     resume_checkpoint = os.environ.get("PIDSMAKER_RESUME_CHECKPOINT")
     save_checkpoint = os.environ.get("PIDSMAKER_SAVE_CHECKPOINT")
+    resume_optimizer = os.environ.get("PIDSMAKER_RESUME_OPTIMIZER") == "1"
     start_epoch = 0
     if resume_checkpoint:
         checkpoint = torch.load(resume_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if checkpoint.get("optimizer_state_dict") is not None:
+        adjusted_model_keys = load_checkpoint_model_state(model, checkpoint["model_state_dict"])
+        if resume_optimizer and checkpoint.get("optimizer_state_dict") is not None:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if adjusted_model_keys:
+            log(
+                "Adjusted zero-sized checkpoint tensors: " + ", ".join(adjusted_model_keys),
+                return_line=True,
+            )
         start_epoch = int(checkpoint.get("last_epoch", -1)) + 1
         log(
             f"Loaded training checkpoint from {resume_checkpoint}; continuing at epoch {start_epoch}",
@@ -159,7 +210,7 @@ def main(cfg):
         # Few-shot learning fine tuning
         if use_few_shot:
             model.to_fine_tuning(True)
-            optimizer = optimizer_few_shot_factory(cfg, parameters=set(model.parameters()))
+            optimizer = optimizer_few_shot_factory(cfg, parameters=list(model.parameters()))
 
             num_epochs_few_shot = cfg.training.decoder.few_shot.num_epochs_few_shot
             patience_few_shot = cfg.training.decoder.few_shot.patience_few_shot
