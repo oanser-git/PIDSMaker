@@ -11,6 +11,7 @@ Handles model training with:
 
 import copy
 import os
+import random
 import tracemalloc
 from time import perf_counter as timer
 
@@ -27,6 +28,29 @@ from pidsmaker.tasks.batching import get_preprocessed_graphs
 from pidsmaker.utils.utils import get_device, log, log_start, log_tqdm, set_seed
 
 from . import inference_loop
+
+
+def env_flag(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def capture_rng_state():
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def restore_rng_state(rng_state):
+    if not isinstance(rng_state, dict):
+        raise RuntimeError("Full checkpoint is missing RNG state")
+    random.setstate(rng_state["python"])
+    np.random.set_state(rng_state["numpy"])
+    torch.set_rng_state(rng_state["torch"])
+    if rng_state.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(rng_state["cuda"])
 
 
 def load_checkpoint_model_state(model, checkpoint_state):
@@ -74,6 +98,64 @@ def load_checkpoint_model_state(model, checkpoint_state):
     return adjusted_keys
 
 
+def normalize_zero_sized_optimizer_state(optimizer):
+    adjusted = []
+    for group_index, group in enumerate(optimizer.param_groups):
+        for param_index, param in enumerate(group["params"]):
+            state = optimizer.state.get(param)
+            if not isinstance(state, dict) or param.numel() != 0:
+                continue
+            for key, value in list(state.items()):
+                if not torch.is_tensor(value) or value.numel() != 0 or tuple(value.shape) == tuple(param.shape):
+                    continue
+                state[key] = torch.zeros_like(param)
+                adjusted.append("group{}.param{}.{}".format(group_index, param_index, key))
+    return adjusted
+
+
+def checkpoint_training_state(
+    epoch_times,
+    peak_train_cpu_mem,
+    peak_train_gpu_mem,
+    test_stats,
+    patience_counter,
+    all_test_stats,
+    global_best_val_score,
+    best_val_score,
+    best_epoch,
+    best_model,
+):
+    return {
+        "epoch_times": list(epoch_times),
+        "peak_train_cpu_mem": peak_train_cpu_mem,
+        "peak_train_gpu_mem": peak_train_gpu_mem,
+        "test_stats": test_stats,
+        "patience_counter": patience_counter,
+        "all_test_stats": list(all_test_stats),
+        "global_best_val_score": global_best_val_score,
+        "best_val_score": best_val_score,
+        "best_epoch": best_epoch,
+        "best_model_state_dict": best_model,
+    }
+
+
+def apply_checkpoint_training_state(state):
+    if not isinstance(state, dict):
+        raise RuntimeError("Full checkpoint is missing training state")
+    return {
+        "epoch_times": list(state.get("epoch_times") or []),
+        "peak_train_cpu_mem": float(state.get("peak_train_cpu_mem") or 0),
+        "peak_train_gpu_mem": float(state.get("peak_train_gpu_mem") or 0),
+        "test_stats": state.get("test_stats"),
+        "patience_counter": int(state.get("patience_counter") or 0),
+        "all_test_stats": list(state.get("all_test_stats") or []),
+        "global_best_val_score": float(state.get("global_best_val_score", float("-inf"))),
+        "best_val_score": float(state.get("best_val_score", float("-inf"))),
+        "best_epoch": state.get("best_epoch"),
+        "best_model": state.get("best_model_state_dict"),
+    }
+
+
 def main(cfg):
     """Main training loop executing self-supervised pretraining and optional few-shot fine-tuning.
 
@@ -109,16 +191,37 @@ def main(cfg):
 
     resume_checkpoint = os.environ.get("PIDSMAKER_RESUME_CHECKPOINT")
     save_checkpoint = os.environ.get("PIDSMAKER_SAVE_CHECKPOINT")
-    resume_optimizer = os.environ.get("PIDSMAKER_RESUME_OPTIMIZER") == "1"
+    resume_full_state = env_flag("PIDSMAKER_RESUME_FULL_STATE")
+    save_full_state = env_flag("PIDSMAKER_CHECKPOINT_FULL_STATE")
+    resume_optimizer = env_flag("PIDSMAKER_RESUME_OPTIMIZER") or resume_full_state
+    resume_training_state = None
     start_epoch = 0
     if resume_checkpoint:
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
+        checkpoint = torch.load(resume_checkpoint, map_location="cpu")
+        if resume_full_state and checkpoint.get("checkpoint_mode") != "full_state":
+            raise RuntimeError(
+                "PIDSMAKER_RESUME_FULL_STATE=1 requires a full_state checkpoint: "
+                f"{resume_checkpoint}"
+            )
         adjusted_model_keys = load_checkpoint_model_state(model, checkpoint["model_state_dict"])
-        if resume_optimizer and checkpoint.get("optimizer_state_dict") is not None:
+        if resume_optimizer:
+            if checkpoint.get("optimizer_state_dict") is None:
+                raise RuntimeError(f"Checkpoint has no optimizer state: {resume_checkpoint}")
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            adjusted_optimizer_keys = normalize_zero_sized_optimizer_state(optimizer)
+        else:
+            adjusted_optimizer_keys = []
+        if resume_full_state:
+            restore_rng_state(checkpoint.get("rng_state"))
+            resume_training_state = apply_checkpoint_training_state(checkpoint.get("training_state"))
         if adjusted_model_keys:
             log(
                 "Adjusted zero-sized checkpoint tensors: " + ", ".join(adjusted_model_keys),
+                return_line=True,
+            )
+        if adjusted_optimizer_keys:
+            log(
+                "Adjusted zero-sized optimizer checkpoint tensors: " + ", ".join(adjusted_optimizer_keys),
                 return_line=True,
             )
         start_epoch = int(checkpoint.get("last_epoch", -1)) + 1
@@ -143,15 +246,27 @@ def main(cfg):
     patience_counter = 0
     all_test_stats = []
     global_best_val_score = float("-inf")
+    best_val_score, best_model, best_epoch = float("-inf"), None, None
     use_few_shot = cfg.training.decoder.use_few_shot
     grad_acc = cfg.training.grad_accumulation
+
+    if resume_training_state:
+        epoch_times = resume_training_state["epoch_times"]
+        peak_train_cpu_mem = resume_training_state["peak_train_cpu_mem"]
+        peak_train_gpu_mem = resume_training_state["peak_train_gpu_mem"]
+        test_stats = resume_training_state["test_stats"]
+        patience_counter = resume_training_state["patience_counter"]
+        all_test_stats = resume_training_state["all_test_stats"]
+        global_best_val_score = resume_training_state["global_best_val_score"]
+        best_val_score = resume_training_state["best_val_score"]
+        best_epoch = resume_training_state["best_epoch"]
+        best_model = resume_training_state["best_model"]
 
     if use_few_shot:
         num_epochs += 1  # in few-shot, the first epoch is without ssl training
 
+    last_completed_epoch = start_epoch - 1
     for epoch in range(start_epoch, num_epochs):
-        best_val_score, best_model, best_epoch = float("-inf"), None, None
-
         if not use_few_shot or (use_few_shot and epoch > 0):
             start = timer()
             tracemalloc.start()
@@ -309,6 +424,34 @@ def main(cfg):
                     "test_loss": round(test_stats["test_loss"], 4),
                 }
             )
+        last_completed_epoch = epoch
+
+    if save_checkpoint:
+        os.makedirs(os.path.dirname(save_checkpoint), exist_ok=True)
+        checkpoint = {
+            "checkpoint_schema_version": 2,
+            "checkpoint_mode": "full_state" if save_full_state else "model_optimizer",
+            "last_epoch": last_completed_epoch,
+            "model_state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
+            "optimizer_state_dict": optimizer.state_dict(),
+            "training_num_epochs": num_epochs,
+        }
+        if save_full_state:
+            checkpoint["rng_state"] = capture_rng_state()
+            checkpoint["training_state"] = checkpoint_training_state(
+                epoch_times,
+                peak_train_cpu_mem,
+                peak_train_gpu_mem,
+                test_stats,
+                patience_counter,
+                all_test_stats,
+                global_best_val_score,
+                best_val_score,
+                best_epoch,
+                best_model,
+            )
+        torch.save(checkpoint, save_checkpoint)
+        log(f"Saved training checkpoint to {save_checkpoint}", return_line=True)
 
     # After training
     if best_epoch_mode:
@@ -340,19 +483,6 @@ def main(cfg):
             ),
         }
     )
-
-    if save_checkpoint:
-        os.makedirs(os.path.dirname(save_checkpoint), exist_ok=True)
-        torch.save(
-            {
-                "last_epoch": num_epochs - 1,
-                "model_state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
-                "optimizer_state_dict": optimizer.state_dict(),
-                "training_num_epochs": num_epochs,
-            },
-            save_checkpoint,
-        )
-        log(f"Saved training checkpoint to {save_checkpoint}", return_line=True)
 
     return best_val_score
 
